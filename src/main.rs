@@ -19,7 +19,7 @@ use std::string::ToString;
 use actix_web::Result as ActixWebResult;
 use actix_web::error::{ErrorInternalServerError, ErrorUnauthorized, ParseError};
 use actix_web::middleware::{Middleware, Started};
-use actix_web::{http, server, App, Either, Error, HttpRequest, HttpResponse, Json, Responder};
+use actix_web::{http, server, App, Error, HttpRequest, HttpResponse, Json, Responder};
 
 /// An incoming PushEvent from Github Webhook.
 #[derive(Deserialize)]
@@ -134,14 +134,23 @@ fn index(push: Json<PushEvent>) -> impl Responder {
     }
 }
 
+fn get_server_port() -> u16 {
+    env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080)
+}
+
 fn main() {
+    use std::net::{SocketAddr, ToSocketAddrs};
     let sys = actix::System::new("updater");
+    let addr = SocketAddr::from(([0, 0, 0, 0], get_server_port()));
 
     server::new(|| {
         App::new()
             .middleware(HeaderCheck)
             .resource("/", |r| r.method(http::Method::POST).with(index))
-    }).bind("127.0.0.1:8088")
+    }).bind(addr)
         .unwrap()
         .start();
 
