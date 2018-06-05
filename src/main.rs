@@ -8,6 +8,7 @@ extern crate serde_json;
 
 extern crate actix;
 extern crate actix_web;
+extern crate crypto;
 extern crate reqwest;
 
 #[cfg(test)]
@@ -19,7 +20,11 @@ use std::string::ToString;
 use actix_web::Result as ActixWebResult;
 use actix_web::error::{ErrorInternalServerError, ErrorUnauthorized, ParseError};
 use actix_web::middleware::{Middleware, Started};
-use actix_web::{http, server, App, Error, HttpRequest, HttpResponse, Json, Responder};
+use actix_web::{http, server, App, Error, HttpMessage, HttpRequest, HttpResponse, Json, Responder};
+
+use crypto::hmac::Hmac;
+use crypto::mac::Mac;
+use crypto::sha1::Sha1;
 
 /// An incoming PushEvent from Github Webhook.
 #[derive(Deserialize)]
@@ -77,23 +82,52 @@ impl ServerMessage {
     }
 }
 
-struct HeaderCheck;
+struct VerifySignature;
 
-impl<S> Middleware<S> for HeaderCheck {
+impl<S> Middleware<S> for VerifySignature {
     fn start(&self, req: &mut HttpRequest<S>) -> ActixWebResult<Started> {
-        let s = req.headers_mut()
+        use std::io::Read;
+
+        let r = req.clone();
+        let s = r.headers()
             .get("X-Hub-Signature")
             .ok_or(ErrorUnauthorized(ParseError::Header))?
             .to_str()
             .map_err(ErrorUnauthorized)?;
-        // check authorization
-        let target = env::var("GITHUB_SECRET").unwrap();
-        if s == target {
+        // strip "sha1=" from the header
+        let (_, sig) = s.split_at(5);
+
+        let secret = env::var("GITHUB_SECRET").unwrap();
+        let mut body = String::new();
+        req.read_to_string(&mut body)
+            .map_err(ErrorInternalServerError)?;
+
+        if is_valid_signature(&sig, &body, &secret) {
             Ok(Started::Done)
         } else {
             Err(ErrorUnauthorized(ParseError::Header))
         }
     }
+}
+
+fn is_valid_signature(signature: &str, body: &str, secret: &str) -> bool {
+    let digest = Sha1::new();
+    let mut hmac = Hmac::new(digest, secret.as_bytes());
+    hmac.input(body.as_bytes());
+    let expected_signature = hmac.result();
+
+    crypto::util::fixed_time_eq(
+        bytes_to_hex(expected_signature.code().to_vec()).as_bytes(),
+        signature.as_bytes(),
+    )
+}
+
+fn bytes_to_hex(bytes: Vec<u8>) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<String>>()
+        .join("")
 }
 
 fn travis_request(url: &str) -> ActixWebResult<reqwest::Response> {
@@ -148,7 +182,7 @@ fn main() {
 
     server::new(|| {
         App::new()
-            .middleware(HeaderCheck)
+            .middleware(VerifySignature)
             .resource("/", |r| r.method(http::Method::POST).with(index))
     }).bind(addr)
         .unwrap()
